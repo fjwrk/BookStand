@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+*.pkl
+*.pt
+*.pth
+*.bin
+*.model
+*.ckpt
+.cache/
+.mamba/
+.env
+.ipynb_checkpoints/
+transformers_cache/
+HF_HOME/
+*.dylib
+*.so
