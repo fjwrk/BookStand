@@ -1,0 +1,5 @@
+PyPDF2
+langdetect
+transformers
+sentencepiece
+torch
