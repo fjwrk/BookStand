@@ -6,6 +6,19 @@ import time
 from langdetect import detect_langs, DetectorFactory
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import torch
+import requests
+import importlib
+import shutil
+import os
+import json
+from pathlib import Path
+from text_utils import reflow_paragraphs
+
+# Tool version for metadata
+TOOL_VERSION = "0.2"
+
+# Default output root directory (iCloud Obsidian Vault)
+DEFAULT_OUTPUT_ROOT = os.path.expanduser("/Users/fjwrk/Library/Mobile Documents/iCloud~md~obsidian/Documents/den/BookShelf")
 
 # 設定
 PDF_PATH = None
@@ -132,9 +145,11 @@ def translate_pages_marian(
         for idx, text in enumerate(page_texts):
             if not text or not text.strip():
                 continue
-            # 段落単位に正規化してからチャンク化する
-            paragraphs = normalize_paragraphs(text)
+            # Use reflow_paragraphs to align translation units with display
+            paras_text = reflow_paragraphs(text)
+            paragraphs = paras_text.split("\n\n") if paras_text else []
             para_chunks = chunk_paragraphs(paragraphs, max_chars=800)
+
             translated_parts = []
             for chunk_paras in para_chunks:
                 chunk_text = "\n\n".join(chunk_paras)
@@ -213,21 +228,22 @@ def tts_and_measure(text, say_rate=None):
 def measure_seconds_per_char(
     page_texts, sample_pages=None, say_rate=None, skip_tts=False
 ):
+    # sample_pages が未指定なら、最初の非空ページを最大3ページサンプルにする
     if sample_pages is None:
-        # 最初の非空ページを最大3ページサンプルにする
         sample_pages = []
-        for idx, t in enumerate(page_texts):
-            if t and t.strip():
+        for idx, text in enumerate(page_texts):
+            if text and text.strip():
                 sample_pages.append(idx)
             if len(sample_pages) >= 3:
                 break
+
     total_chars = 0
     total_seconds = 0.0
     for i in sample_pages:
         if i < 0 or i >= len(page_texts):
             continue
         text = page_texts[i]
-        if not text.strip():
+        if not text or not text.strip():
             continue
         print(f"ページ{i + 1}を音読して計測します...")
         if skip_tts:
@@ -239,11 +255,9 @@ def measure_seconds_per_char(
         print(f"{chars}文字, {sec:.2f}秒")
         total_chars += chars
         total_seconds += sec
-    if total_chars == 0:
-        # フォールバック値: 1文字あたり0.5秒
-        return 0.5
-    # total_seconds may be 0 if skip_tts was True; handle that
-    if total_seconds == 0.0:
+
+    # フォールバック: サンプルが無い場合や秒数が0の場合は1文字あたり0.5秒
+    if total_chars == 0 or total_seconds == 0.0:
         return 0.5
     return total_seconds / total_chars
 
@@ -282,17 +296,34 @@ def generate_reading_plan_by_seconds(page_seconds, minutes_per_day, start_date):
 
 
 # Obsidian用ToDo出力
-def export_obsidian_todo(plan):
+def export_obsidian_todo(plan, pdf_basename=None, out_dir=None):
+    # Tasks-style Markdown tasks with scheduled/due and absolute link to HTML page
     lines = []
     for item in plan:
+        date = item["date"]
+        start = item["start_page"]
+        end = item["end_page"]
+        scheduled = date
+        due = date
+        # Absolute path to the HTML page in pages/
+        if out_dir:
+            p = Path(os.path.join(out_dir, "pages", f"page{start}.html")).resolve()
+        else:
+            p = Path(os.path.join("pages", f"page{start}.html")).resolve()
+        # Use file URI so Obsidian recognizes absolute local file links
+        abs_link = p.as_uri()
+        # Include BookStand and PDF basename in each task title
+        title_prefix = "BookStand"
+        if pdf_basename:
+            title_prefix = f"{title_prefix} {pdf_basename}"
         lines.append(
-            f"- [ ] {item['date']} ページ{item['start_page']}〜{item['end_page']}"
+            f"- [ ] {title_prefix} — Pages {start}–{end} — scheduled: {scheduled} due: {due} — [Open HTML]({abs_link})"
         )
     return "\n".join(lines)
 
 
 def write_plan_with_frontmatter(
-    plan, pdf_path, minutes_per_day, tts_speed, out_path="reading_plan.md"
+    plan, pdf_path, minutes_per_day, tts_speed, out_path="reading_plan.md", pdf_basename=None, out_dir=None
 ):
     created = datetime.now().strftime("%Y-%m-%d")
     front = [
@@ -308,7 +339,7 @@ def write_plan_with_frontmatter(
     ]
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(front))
-        f.write(export_obsidian_todo(plan))
+        f.write(export_obsidian_todo(plan, pdf_basename=pdf_basename, out_dir=out_dir))
     print(f"Obsidian用計画を{out_path}に出力しました。")
 
 
@@ -340,6 +371,26 @@ if __name__ == "__main__":
         default="staka/fugumt-en-ja",
         help="MarianMT model id for translation",
     )
+    parser.add_argument(
+        "--translate-url",
+        default=None,
+        help="URL of a translation server (POST /translate) to use instead of local MarianMT",
+    )
+    parser.add_argument(
+        "--export-html",
+        action="store_true",
+        help="Export per-page HTML viewer after generating translations",
+    )
+    parser.add_argument(
+        "--html-outdir",
+        default="html_output",
+        help="Output directory for generated HTML (used with --export-html)",
+    )
+    parser.add_argument(
+        "--out-root",
+        default=DEFAULT_OUTPUT_ROOT,
+        help="Root output directory for all generated files (per-PDF subfolders)",
+    )
     args = parser.parse_args()
 
     PDF_PATH = args.pdf
@@ -357,8 +408,32 @@ if __name__ == "__main__":
     print(f"1文字あたり平均{sec_per_char:.3f}秒 (tts-speed={args.tts_speed}x)")
     page_seconds = estimate_page_seconds(page_char_counts, sec_per_char)
     plan = generate_reading_plan_by_seconds(page_seconds, MINUTES_PER_DAY, START_DATE)
-    # write Obsidian plan with frontmatter
-    write_plan_with_frontmatter(plan, PDF_PATH, MINUTES_PER_DAY, args.tts_speed)
+
+    # Prepare output directory: per-PDF subfolder under out-root with timestamp
+    out_root = os.path.expanduser(args.out_root or DEFAULT_OUTPUT_ROOT)
+    pdf_basename = os.path.splitext(os.path.basename(PDF_PATH))[0]
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    out_dir = os.path.join(out_root, f"{pdf_basename}_{ts}")
+    staging_dir = out_dir + ".staging"
+    # Ensure staging dir is clean
+    if os.path.exists(staging_dir):
+        shutil.rmtree(staging_dir)
+    os.makedirs(staging_dir, exist_ok=True)
+
+    # write Obsidian plan with frontmatter into staging_dir (reading_plan.md stays at root of staging)
+    plan_path = os.path.join(staging_dir, "reading_plan.md")
+    write_plan_with_frontmatter(
+        plan,
+        PDF_PATH,
+        MINUTES_PER_DAY,
+        args.tts_speed,
+        out_path=plan_path,
+        pdf_basename=pdf_basename,
+        out_dir=staging_dir,
+    )
+    # create md subfolder for translations and segments inside staging
+    md_dir = os.path.join(staging_dir, "md")
+    os.makedirs(md_dir, exist_ok=True)
     # 自動言語判定と（英語なら）MarianMTによるオフライン翻訳
     if args.no_translate:
         translated_pages = None
@@ -367,13 +442,62 @@ if __name__ == "__main__":
         lang = detect_language_of_document(page_texts)
         print(f"検出言語: {lang}")
         if lang and lang.startswith("en"):
-            try:
-                translated_pages = translate_pages_marian(
-                    page_texts, out_path="translations.md", model_id=args.model_id
-                )
-            except Exception as e:
-                print("翻訳に失敗しました:", e)
-                translated_pages = None
+            if args.translate_url:
+                try:
+                    def translate_pages_remote(page_texts, out_path="translations.md", translate_url=None, src_lang="en_XX", tgt_lang="ja_XX"):
+                        # translate_url must be provided when using remote translation
+                        if translate_url is None:
+                            raise ValueError("translate_url must be provided for remote translation")
+                        translated_pages = ["" for _ in page_texts]
+                        with open(out_path, "w", encoding="utf-8") as f:
+                            f.write("# Translations (Japanese)\n\n")
+                            for idx, text in enumerate(page_texts):
+                                if not text or not text.strip():
+                                    continue
+                                # Use reflow_paragraphs so translation units match display
+                                paras_text = reflow_paragraphs(text)
+                                paragraphs = paras_text.split("\n\n") if paras_text else []
+                                para_chunks = chunk_paragraphs(paragraphs, max_chars=800)
+                                translated_parts = []
+                                for chunk_paras in para_chunks:
+                                    chunk_text = "\n\n".join(chunk_paras)
+                                    try:
+                                        resp = requests.post(
+                                            translate_url,
+                                            json={"text": chunk_text, "src_lang": src_lang, "tgt_lang": tgt_lang},
+                                            timeout=30,
+                                        )
+                                        if resp.status_code != 200:
+                                            print(f"ページ{idx+1}チャンク翻訳でサーバ応答エラー: {resp.status_code}")
+                                            continue
+                                        data = resp.json()
+                                        translated_parts.append(data.get("text", ""))
+                                    except Exception as e:
+                                        print(f"ページ{idx+1}チャンクのリモート翻訳失敗: {e}")
+                                        continue
+                                full_trans = "\n\n".join(translated_parts)
+                                translated_pages[idx] = full_trans
+                                f.write(f"## Page {idx + 1}\n\n")
+                                f.write(full_trans + "\n\n")
+                        print(f"日本語訳を{out_path}に出力しました（remote: {translate_url}）。")
+                        return translated_pages
+
+                    translations_path = os.path.join(md_dir, "translations.md")
+                    translated_pages = translate_pages_remote(
+                        page_texts, out_path=translations_path, translate_url=args.translate_url
+                    )
+                except Exception as e:
+                    print("リモート翻訳に失敗しました:", e)
+                    translated_pages = None
+            else:
+                try:
+                    translations_path = os.path.join(md_dir, "translations.md")
+                    translated_pages = translate_pages_marian(
+                        page_texts, out_path=translations_path, model_id=args.model_id
+                    )
+                except Exception as e:
+                    print("翻訳に失敗しました:", e)
+                    translated_pages = None
         else:
             translated_pages = None
             print(
@@ -412,4 +536,62 @@ if __name__ == "__main__":
                 f.write("---\n\n")
         print(f"読み上げ用テキストを{out_path}に出力しました。")
 
-    export_reading_segments(plan, page_texts, translated_pages=translated_pages)
+    segments_path = os.path.join(md_dir, "reading_segments.md")
+    export_reading_segments(plan, page_texts, translated_pages=translated_pages, out_path=segments_path)
+
+    # Optional: export HTML viewer (PDF embed + original + translation)
+    if args.export_html:
+        try:
+            # import export_html lazily
+            export_html = importlib.import_module("export_html")
+            # Generate HTML into staging_dir (PDF will be copied to final out_dir after staging complete)
+            html_outdir = staging_dir  # write index.html and pages/pageN.html at staging_dir root
+            print(f"Exporting HTML to {html_outdir} ...")
+            translations_md = os.path.join(md_dir, "translations.md")
+            reading_plan_md = os.path.join(staging_dir, "reading_plan.md")
+            # Pass original PDF_PATH to exporter; generated pages reference ../<pdf_name> and will work after final copy
+            export_html.generate(PDF_PATH, translations_md, reading_plan_md, out_dir=html_outdir)
+            print("HTML export complete.")
+        except Exception as e:
+            print("HTMLエクスポートに失敗しました:", e)
+
+    # Write metadata.json summarizing outputs in staging
+    try:
+        meta = {
+            "tool_version": TOOL_VERSION,
+            "generated_at": datetime.now().isoformat(),
+            "pdf": os.path.abspath(PDF_PATH),
+            "out_dir": os.path.abspath(out_dir),
+            "minutes_per_day": MINUTES_PER_DAY,
+            "tts_speed": args.tts_speed,
+            "pages": len(page_texts),
+            "translate_used": not args.no_translate,
+            "translate_method": args.translate_url if args.translate_url else args.model_id,
+            "generated_files": [
+                os.path.join(staging_dir, "reading_plan.md"),
+                os.path.join(staging_dir, "md", "translations.md"),
+                os.path.join(staging_dir, "md", "reading_segments.md"),
+                os.path.join(staging_dir, "pages"),
+            ],
+        }
+        meta_path = os.path.join(staging_dir, "metadata.json")
+        with open(meta_path, "w", encoding="utf-8") as mf:
+            json.dump(meta, mf, ensure_ascii=False, indent=2)
+        print(f"メタデータを{meta_path}に出力しました。")
+    except Exception as e:
+        print("メタデータ出力に失敗しました:", e)
+
+    # Finalize: move staging to final out_dir atomically and copy PDF into out_dir
+    try:
+        if os.path.exists(out_dir):
+            bak = out_dir + ".bak." + ts
+            os.rename(out_dir, bak)
+        os.rename(staging_dir, out_dir)
+        # copy PDF into final out_dir
+        try:
+            shutil.copy2(PDF_PATH, out_dir)
+        except Exception:
+            pass
+        print(f"最終出力を{out_dir}に移動しました。")
+    except Exception as e:
+        print("出力の最終移動に失敗しました:", e)
