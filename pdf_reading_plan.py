@@ -429,7 +429,7 @@ if __name__ == "__main__":
         args.tts_speed,
         out_path=plan_path,
         pdf_basename=pdf_basename,
-        out_dir=staging_dir,
+        out_dir=out_dir,
     )
     # create md subfolder for translations and segments inside staging
     md_dir = os.path.join(staging_dir, "md")
