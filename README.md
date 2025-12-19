@@ -1,19 +1,36 @@
 # BookStand
 
-Small CLI to generate daily reading plans and Obsidian-compatible outputs for PDFs.
+PDFから毎日の読書計画を生成し、Obsidianで扱いやすい形式で出力する小さなCLIツールです。
 
-## Features
+## 機能
 
-- Extracts text from a PDF and estimates reading time per page.
-- Generates a daily reading plan targeting N minutes/day.
-- Optional translation (local MarianMT or remote translation server via `--translate-url`).
-- Exports per-page HTML viewer (left: embedded PDF, right: English above / Japanese below) with TTS controls.
-- Produces Obsidian Tasks-style `reading_plan.md`, `md/translations.md`, `md/reading_segments.md`, `pages/pageN.html`, and `metadata.json`.
-- Writes to a timestamped per-PDF output folder. Generation is performed in a staging folder and moved atomically to the final folder when complete to avoid incomplete outputs.
+- PDFからテキストを抽出し、ページごとの読書時間を推定します。
+- 1日あたりの目標分数に合わせた日次の読書計画（Obsidian Tasks形式のTODO出力）を生成します。
+- 翻訳はローカルMarianMTまたはリモート翻訳サーバ（`--translate-url`）を選択可能です。
+- ページ単位のHTMLビューアを出力します（左に埋め込みPDF、右に英語原文／日本語訳、TTS操作付き）。
+- 各PDFごとにタイムスタンプ付きフォルダを作成し、`reading_plan.md`、`md/translations.md`、`md/reading_segments.md`、`pages/pageN.html`、`metadata.json` を出力します。
 
-## Install
+## Obsidian Tasks互換性
 
-Create and activate a virtualenv, then install dependencies:
+- 出力される `reading_plan.md` は Obsidian Tasks プラグインが認識しやすい日付表記（絵文字）を使用します。タスク例:
+
+```markdown
+- [ ] BookStand MyDoc.pdf — Pages 1–1 🛫 2025-12-19 📆 2025-12-19 — [Open HTML](file:///absolute/path/to/pages/page1.html)
+```
+
+- 意味:
+	- `🛫 YYYY-MM-DD` = スケジュール（開始予定日）
+	- `📆 YYYY-MM-DD` = 締切（期限日）
+
+- 出力は絶対 `file://` URI を使っており、Obsidianから直接開けます。
+
+## ステージング / アトミック出力
+
+- 生成はまず `.staging` ディレクトリ内で行われ、すべての生成物（翻訳、HTML、metadata）が揃った段階で最終のタイムスタンプ付きフォルダへアトミックにリネームされます。これにより不完全な出力がObsidianに見えるのを防ぎます。
+
+## インストール
+
+仮想環境を作成して有効化し、依存関係をインストールしてください:
 
 ```bash
 python -m venv .venv
@@ -21,42 +38,43 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-(If you don't have `requirements.txt`, install: `PyPDF2 langdetect transformers torch requests`.)
+`requirements.txt` が無い場合の最低限のパッケージ:
 
-## Usage
+```bash
+pip install PyPDF2 langdetect transformers torch requests
+```
 
-Basic quick run (no translation, no TTS measurement):
+## 使い方
+
+簡易実行（翻訳なし、TTS計測なし）:
 
 ```bash
 python pdf_reading_plan.py /path/to/file.pdf --no-translate --no-measure --export-html
 ```
 
-Use remote translation server (POST /translate) instead of local model:
+リモート翻訳サーバ（POST `/translate`）を使う例:
 
 ```bash
 python pdf_reading_plan.py /path/to/file.pdf --translate-url http://<host>:8000/translate --no-measure --export-html
 ```
 
-Use local MarianMT model (default if no `--translate-url`):
+PDFフォルダ内の全ファイルを一括処理する例:
 
 ```bash
-python pdf_reading_plan.py /path/to/file.pdf --model-id staka/fugumt-en-ja --export-html
+for f in PDF/*.pdf; do python pdf_reading_plan.py "$f" --translate-url http://<host>:8000/translate --no-measure --export-html; done
 ```
 
-TTS speed options: `1.0`, `1.5`, `2.0` (use `--tts-speed 1.5`)
+TTS速度オプション: `1.0`, `1.5`, `2.0`（例: `--tts-speed 1.5`）。`--no-measure` を指定すると既定値（平均速度）を使用します。
 
-Output is written under the `--out-root` (defaults to iCloud Obsidian vault set in the script). Each run creates a timestamped folder.
+## 注意事項
 
-## Notes
+- ローカルMarianMTモデルは大きく、ダウンロードに時間とディスク容量が必要です。
+- リモート翻訳サーバを利用する場合、`/translate` エンドポイントが JSON `{text, src_lang, tgt_lang}` を受け取り `{text}` を返す形式を満たしていることを確認してください。
 
-- By default the script performs generation in a `.staging` directory and atomically renames it to the final folder when complete.
-- If using local MarianMT, the model will be downloaded and may require sufficient disk space and time.
-- The `export_html` module is used to generate per-page HTML; ensure it is present in the same workspace.
-
-## Version
+## バージョン
 
 Tool version: 0.2
 
-## License
+## ライセンス
 
 MIT
