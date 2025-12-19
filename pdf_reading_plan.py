@@ -317,7 +317,7 @@ def export_obsidian_todo(plan, pdf_basename=None, out_dir=None):
         if pdf_basename:
             title_prefix = f"{title_prefix} {pdf_basename}"
         lines.append(
-            f"- [ ] {title_prefix} — Pages {start}–{end} — scheduled: {scheduled} due: {due} — [Open HTML]({abs_link})"
+            f"- [ ] {title_prefix} — Pages {start}–{end} 🛫 {scheduled} 📆 {due} — [Open HTML]({abs_link})"
         )
     return "\n".join(lines)
 
